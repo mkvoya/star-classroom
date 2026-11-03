@@ -56,3 +56,9 @@ next-env.d.ts
 /work/
 /.playwright-cli/
 *.tsbuildinfo
+
+# Local credentials and Python caches
+.dev.vars*
+token.json
+__pycache__/
+*.py[cod]

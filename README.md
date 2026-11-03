@@ -23,7 +23,7 @@ React / Vinext + Cloudflare Workers + D1。轮次与答案通过数据库 revisi
 - `python3 tests/classroom_api.py`：针对本地 5173 服务的多人集成检查。
 - 新数据库先应用 drizzle 下的迁移，正式部署由 Sites 执行迁移。
 
-`.openai/hosting.json` 保留 Sites 项目标识和 D1 绑定。正式访问策略由 Sites 管理；应用本身不要求学生账号。当前发布为私有预览，公开访问需所有者确认。
+`.openai/hosting.json` 保留 Sites 项目标识和 D1 绑定。正式访问策略由 Sites 管理；应用本身不要求学生账号。当前线上课堂公开访问，无需 ChatGPT 登录。
 
 ## 浏览器直传作业
 
@@ -47,3 +47,28 @@ React / Vinext + Cloudflare Workers + D1。轮次与答案通过数据库 revisi
 停止接收关闭浏览器连接并停止签发凭据，但不立即撤销已签发的临时凭据。课堂码和浏览器身份不是实名身份验证，短期凭据在有效期内也可能被复制，需在 Cloudflare 控制台关注额度使用。
 
 未配置密钥时保留原来的直连功能。Cloudflare API 异常时显示重试提示，不假报中继已就绪。凭据响应过滤浏览器不支持的端口及非 Cloudflare 主机。测试包括 `node tests/cloudflare-turn.mjs`；`tests/files_api.py` 在未配置 TURN 的本地环境检查认证与回退。
+
+## 本地开发与 CI
+
+需要 Node.js 24 LTS、npm 和 Python 3（API 测试仅使用标准库）。
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run test:integration
+npm run build
+```
+
+`test:integration` 自动创建临时 D1 数据库、应用迁移、在 127.0.0.1:5173 启动服务，检查课堂权限、答案保密、并发提交、文件信令隔离和未配置 TURN 时的直连回退。结束后关闭服务并删除临时数据；请先停止占用 5173 的本地服务。测试不需要 Cloudflare 账号或生产密钥。
+
+交互式开发时，先初始化本地数据库：
+
+```sh
+npx wrangler d1 execute DB --local --config wrangler.local.json --file drizzle/0000_little_patriot.sql
+npm run dev -- --hostname 127.0.0.1
+```
+
+GitHub Actions 在 push 和 pull request 时运行上述类型检查、单元测试、API 集成测试及生产构建，不自动部署网站。单元测试覆盖接收租约、教师权限、TURN 密钥验证及凭据过滤、ZIP 内容和安全路径。CI 不覆盖真实跨网络 WebRTC 穿透；发布前仍需用师生实际网络验证文件传输与下载。
+
+不要提交 `.env*`、`.dev.vars*` 或真实 TURN 凭据。此仓库的生产部署仍由 Sites 管理；`.openai/hosting.json` 中的项目标识不属于密钥，克隆代码不会获得该项目的管理权限。独立部署需要配置自己的 Workers/D1 和可选 TURN 环境变量。
