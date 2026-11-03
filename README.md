@@ -40,9 +40,9 @@ React / Vinext + Cloudflare Workers + D1。轮次与答案通过数据库 revisi
 
 ## Cloudflare TURN
 
-生产密钥由 Sites 环境变量管理，不写入仓库：`CLOUDFLARE_TURN_KEY_ID`、`CLOUDFLARE_TURN_API_TOKEN`、`TURN_OWNER_USER_ID`。前两项来自 Cloudflare Realtime TURN 专用 key，最后一项是本站所有者的可信平台用户 ID。不是 Cloudflare Global API Key。
+生产密钥由 Sites 环境变量管理，不写入仓库：`CLOUDFLARE_TURN_KEY_ID`、`CLOUDFLARE_TURN_API_TOKEN`、`TURN_TEACHER_PASSPHRASE`。前两项来自 Cloudflare Realtime TURN 专用 key，最后一项是教师开启中继时输入的共享密钥。不是 Cloudflare Global API Key。
 
-教师使用本站所有者的 ChatGPT 账号登录，再开启接收；服务端依据平台认证身份授予该接收会话中继权限，学生仍用课堂码进入。其他访客创建的课堂仅能直连。`files-ice` 要求有效课堂身份、当前接收会话和教师心跳，返回每成员独立的 10 分钟临时凭据。凭据在服务端缓存，在有效期剩余不足 3 分钟时更新；每成员新申请至少间隔 15 秒，使用数据库 revision 原子占位防止并发重复签发。普通课堂/信令响应不包含任何 TURN 凭据。主 API Token 只用于服务端调用 Cloudflare。
+教师开启接收时可选填 TURN 密钥，无需 ChatGPT 登录。服务端验证正确才为该接收会话启用中继；留空、错误密钥或服务未配置均只开启直连，并向教师明确显示结果。密钥仅发送到后端验证，不保存到课堂状态或浏览器持久存储，开启后清空输入框。学生仍用课堂码进入。`files-ice` 要求有效课堂身份、当前接收会话和教师心跳，返回每成员独立的 10 分钟临时凭据。凭据在服务端缓存，在有效期剩余不足 3 分钟时更新；每成员新申请至少间隔 15 秒，使用数据库 revision 原子占位防止并发重复签发。普通课堂/信令响应不包含任何 TURN 凭据。主 API Token 只用于服务端调用 Cloudflare。
 
 停止接收关闭浏览器连接并停止签发凭据，但不立即撤销已签发的临时凭据。课堂码和浏览器身份不是实名身份验证，短期凭据在有效期内也可能被复制，需在 Cloudflare 控制台关注额度使用。
 

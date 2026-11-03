@@ -1,5 +1,4 @@
 import { env } from 'cloudflare:workers';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { canEnableTurn, DIRECT_ICE, issueTurn, turnConfigured, TURN_TTL, type TurnEnvironment } from '@/lib/cloudflare-turn';
 import { getDb } from '@/db';
 import { classrooms, classroomRounds } from '@/db/schema';
@@ -23,7 +22,7 @@ function view(s: State, roomCode: string, hash: string, revision: number, includ
   const teacher = s.teacherKey === hash;
   const me = s.members.find(m => m.key === hash);
   if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
-  return { files: { ...fileView(s.files, teacher, me?.id, includeSignals), relay: turnConfigured(env as TurnEnvironment) ? (s.files?.turnEnabled ? 'enabled' : 'signin') : 'unconfigured' }, code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
+  return { files: { ...fileView(s.files, teacher, me?.id, includeSignals), relay: turnConfigured(env as TurnEnvironment) ? (s.files?.turnEnabled ? 'enabled' : 'disabled') : 'unconfigured' }, code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
     members: s.members.map(m => ({ id: m.id, name: m.name, online: Date.now() - m.lastSeen < 45000, participating: s.roster.includes(m.id), submitted: Object.hasOwn(s.answers, m.id), ...(s.status === 'revealed' && Object.hasOwn(s.answers, m.id) ? { answer: s.answers[m.id] } : {}) })),
     submitted: s.roster.filter(id => Object.hasOwn(s.answers,id)).length, total: s.roster.length, ownAnswer: me ? s.answers[me.id] ?? null : null };
 }
@@ -54,7 +53,7 @@ export async function POST(request: Request) {
     }
     const roomCode = code(body.code);
     if (body.action === 'files-ice') return iceCredentials(roomCode, hash, body.session);
-    const turnOwner = body.action === 'files-open' ? canEnableTurn(env as TurnEnvironment, (await getChatGPTUser())?.userId ?? null) : false;
+    const turnAllowed = body.action === 'files-open' && canEnableTurn(env as TurnEnvironment, body.turnPassphrase);
     for (let attempt=0; attempt<10; attempt++) {
       const row = await read(roomCode); const s: State = JSON.parse(row.state);
       const teacher = s.teacherKey === hash; let me = s.members.find(m => m.key === hash);
@@ -68,7 +67,7 @@ export async function POST(request: Request) {
       } else {
         if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
         if (typeof body.action === 'string' && body.action.startsWith('files-')) {
-          try { s.files = updateFiles(s.files, body, teacher, me?.id); if (body.action === 'files-open' && s.files) s.files.turnEnabled = turnOwner; }
+          try { s.files = updateFiles(s.files, body, teacher, me?.id); if (body.action === 'files-open' && s.files) s.files.turnEnabled = turnAllowed; }
           catch (e) { throw new Problem((e as Error).message, 409); }
         } else switch (body.action) {
           case 'heartbeat': if (me) me.lastSeen = Date.now(); break;

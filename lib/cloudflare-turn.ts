@@ -1,9 +1,9 @@
 export type IceServer = { urls: string[]; username?: string; credential?: string };
-export type TurnEnvironment = { CLOUDFLARE_TURN_KEY_ID?: string; CLOUDFLARE_TURN_API_TOKEN?: string; TURN_OWNER_USER_ID?: string };
+export type TurnEnvironment = { CLOUDFLARE_TURN_KEY_ID?: string; CLOUDFLARE_TURN_API_TOKEN?: string; TURN_TEACHER_PASSPHRASE?: string };
 export const TURN_TTL = 600;
 export const DIRECT_ICE: IceServer[] = [{ urls: ['stun:stun.cloudflare.com:3478'] }];
-export function turnConfigured(env: TurnEnvironment) { return Boolean(env.CLOUDFLARE_TURN_KEY_ID && env.CLOUDFLARE_TURN_API_TOKEN && env.TURN_OWNER_USER_ID); }
-export function canEnableTurn(env: TurnEnvironment, userId: string | null) { return turnConfigured(env) && Boolean(userId && userId === env.TURN_OWNER_USER_ID); }
+export function turnConfigured(env: TurnEnvironment) { return Boolean(env.CLOUDFLARE_TURN_KEY_ID && env.CLOUDFLARE_TURN_API_TOKEN && env.TURN_TEACHER_PASSPHRASE); }
+export function canEnableTurn(env: TurnEnvironment, passphrase: unknown) { return turnConfigured(env) && typeof passphrase === 'string' && passphrase.length > 0 && passphrase === env.TURN_TEACHER_PASSPHRASE; }
 export function normalizeIceServers(value: unknown): IceServer[] {
   if (!value || typeof value !== 'object' || !('iceServers' in value) || !Array.isArray(value.iceServers)) throw new Error('Invalid TURN response');
   const servers: IceServer[] = [];

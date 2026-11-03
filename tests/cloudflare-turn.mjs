@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { canEnableTurn, issueTurn, normalizeIceServers, TURN_TTL } from '../lib/cloudflare-turn.ts';
-const env={CLOUDFLARE_TURN_KEY_ID:'test-key',CLOUDFLARE_TURN_API_TOKEN:'test-master-token',TURN_OWNER_USER_ID:'owner'};
+const env={CLOUDFLARE_TURN_KEY_ID:'test-key',CLOUDFLARE_TURN_API_TOKEN:'test-master-token',TURN_TEACHER_PASSPHRASE:'test-teacher-secret'};
 assert.equal(canEnableTurn(env,null),false);
+assert.equal(canEnableTurn(env,''),false);
+assert.equal(canEnableTurn(env,{toString:()=> 'test-teacher-secret'}),false);
 assert.equal(canEnableTurn(env,'stranger'),false);
-assert.equal(canEnableTurn(env,'owner'),true);
-assert.equal(canEnableTurn({},'owner'),false);
+assert.equal(canEnableTurn(env,'test-teacher-secret'),true);
+assert.equal(canEnableTurn({},'test-teacher-secret'),false);
 let calls=0;
 const servers=await issueTurn(env,async(url,options)=>{
  calls++;
@@ -20,4 +22,4 @@ assert.throws(()=>normalizeIceServers({iceServers:[{urls:['turn:turn.cloudflare.
 assert.throws(()=>normalizeIceServers({iceServers:[{urls:['stun:stun.cloudflare.com:3478']}]}));
 await assert.rejects(()=>issueTurn(env,async()=>new Response('secret-provider-error',{status:401})),/^Error: TURN provider unavailable$/);
 await assert.rejects(()=>issueTurn({},async()=>{throw new Error('should not fetch');}));
-console.log('PASS: owner authorization, scoped Cloudflare API call, ten-minute TTL, browser-safe URLs, malformed responses and secret-safe failures.');
+console.log('PASS: teacher passphrase authorization, scoped Cloudflare API call, ten-minute TTL, browser-safe URLs, malformed responses and secret-safe failures.');

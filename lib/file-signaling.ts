@@ -3,7 +3,7 @@ import type { IceServer } from './cloudflare-turn';
 export type FileSignal = { id: string; memberId: string; offer: string; answer?: string; at: number };
 export type TurnGrant = { requestedAt: number; expiresAt: number; servers?: IceServer[] };
 export type FileState = { turnEnabled?: boolean; grants?: Record<string, TurnGrant>; session: string; seen: number; signals: Record<string, FileSignal> };
-export type FileView = { session: string | null; signals: FileSignal[]; relay?: 'enabled' | 'signin' | 'unconfigured' };
+export type FileView = { session: string | null; signals: FileSignal[]; relay?: 'enabled' | 'disabled' | 'unconfigured' };
 const LEASE = 20000;
 const validId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(v);
 export function fileView(state: FileState | undefined, teacher: boolean, memberId?: string, include = false, now = Date.now()): FileView {

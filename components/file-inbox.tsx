@@ -13,6 +13,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   const [available,setAvailable]=useState<string|null>(null),[receiving,setReceiving]=useState(false),[busy,setBusy]=useState(false),[status,setStatus]=useState(''),[error,setError]=useState('');
   const [file,setFile]=useState<File|null>(null),[studentId,setStudentId]=useState(''),[receipts,setReceipts]=useState<Receipt[]>([]),[progress,setProgress]=useState<Record<string,string>>({});
   const [packing,setPacking]=useState(false),[exportStatus,setExportStatus]=useState('');
+  const [turnPassphrase,setTurnPassphrase]=useState(''),[receiveNotice,setReceiveNotice]=useState('');
   const exporting=useRef(false);
   const iceCache=useRef<{session:string;expiresAt:number;config:RTCConfiguration}|null>(null);
   const icePending=useRef<{session:string;promise:Promise<RTCConfiguration>}|null>(null);
@@ -37,12 +38,13 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     const data=await r.json() as {error?:string;files:FileView};if(!r.ok)throw new Error(data.error || '连接中断。');return data.files;
   }
   function closePeers(){for(const p of peers.current.values())p.close();peers.current.clear();}
-  function stop(){const old=session.current;session.current=null;setReceiving(false);setAvailable(null);closePeers();if(old)void api('files-close',{session:old}).catch(()=>{});}
+  function stop(){setReceiveNotice('');const old=session.current;session.current=null;setReceiving(false);setAvailable(null);closePeers();if(old)void api('files-close',{session:old}).catch(()=>{});}
   function update(id: string,text: string){if(alive.current)setProgress(p=>({...p,[id]:text}));}
-  async function start(){setError('');setBusy(true);try{
+  async function start(){setError('');setReceiveNotice('');setBusy(true);try{
     if(!globalThis.RTCPeerConnection)throw new Error('当前浏览器不支持文件直传，请使用新版 Chrome、Edge 或 Firefox。');
     await listReceipts(room.code,identity); // Verify local storage before accepting uploads.
-    const id=crypto.randomUUID();await api('files-open',{session:id});session.current=id;handled.current.clear();setReceiving(true);setAvailable(id);
+    const id=crypto.randomUUID();const opened=await api('files-open',{session:id,turnPassphrase});session.current=id;handled.current.clear();setReceiving(true);setAvailable(id);
+    setReceiveNotice(opened.relay==='enabled'?'TURN 已启用，系统会自动选择直连或中继。':turnPassphrase?'TURN 密钥未通过验证或服务未配置；已开启直连接收，TURN 未启用。':'已开启直连接收，TURN 未启用。');setTurnPassphrase('');
   }catch(e){setError(message(e));}finally{setBusy(false);}}
 
   async function accept(signal: FileView['signals'][number], current: string){
@@ -158,7 +160,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     finally{exporting.current=false;if(alive.current)setPacking(false);}
   }
   return <section className="file-inbox" aria-labelledby="file-inbox-title"><div className="section-title"><h2 id="file-inbox-title">课堂收件箱</h2><span className="subtle">Notebook · 单份最大 20 MB</span></div>
-    {teacher?<>{room.files.relay==='enabled'&&<p className="tiny-note">跨网络接收已启用，系统会自动选择直连或中继。</p>}{room.files.relay==='signin'&&<p className="tiny-note">如需跨网络接收，请先<a href={`/signin-with-chatgpt?return_to=${encodeURIComponent('/?room='+room.code)}`} target="_top">使用网站所有者账号登录</a>，然后重新开启接收；学生无需登录。</p>}{room.files.relay==='unconfigured'&&<p className="tiny-note">当前使用直连；跨网络接收尚未配置。</p>}<p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
+    {teacher?<><p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><div>{!receiving&&<><label htmlFor="turn-passphrase">TURN 密钥（可选）</label><input id="turn-passphrase" type="password" autoComplete="off" value={turnPassphrase} maxLength={128} disabled={busy} onChange={e=>setTurnPassphrase(e.target.value)} placeholder="留空则仅使用直连"/><p className="tiny-note">输入正确密钥可启用跨网络中继；留空或密钥不正确时禁用 TURN。无需 ChatGPT 登录。</p></>}<p role="status" aria-live="polite">{receiveNotice}</p></div><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
       <div role="status" aria-live="polite">{Object.entries(progress).map(([id,text])=><p key={id}>{text}</p>)}</div>
       <h3>本浏览器已收 {receipts.length} 份</h3><button className="secondary" disabled={!receipts.length||packing} onClick={downloadAll}>{packing?'正在打包…':'全部下载（ZIP）'}</button><p className="tiny-note">包含当前课堂本浏览器已收到的全部作业，保留重交版本；打包期间新收到的文件请下次下载。</p><p role="status" aria-live="polite">{exportStatus}</p>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
       <form onSubmit={e=>{e.preventDefault();void send();}}><p>{available?'老师正在接收，可以发送作业。':'老师尚未开启接收，或已经离线。'}</p><label htmlFor="homework-student-id">学号</label><input id="homework-student-id" value={studentId} onChange={e=>setStudentId(e.target.value)} maxLength={40} required disabled={busy}/><label htmlFor="homework-file">作业文件</label><input id="homework-file" type="file" accept=".ipynb" disabled={!available||busy} onChange={e=>{setFile(e.target.files?.[0]||null);setStatus('');setError('');}}/><button className="primary" disabled={!available||!file||busy}>{busy?'正在传输…':'发送给老师'}</button>{busy&&<button type="button" className="secondary" onClick={closePeers}>取消传输</button>}<p role="status" aria-live="polite">{status}</p><p className="tiny-note">以“提交成功”为准。传输期间请勿关闭页面；同学之间看不到作业文件。</p></form>}
