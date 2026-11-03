@@ -1,10 +1,11 @@
 import { getDb } from '@/db';
 import { classrooms, classroomRounds } from '@/db/schema';
 import { and, eq } from 'drizzle-orm';
+import { fileView, updateFiles, type FileState } from '@/lib/file-signaling';
 import type { Classroom } from '@/app/classroom';
 export const dynamic = 'force-dynamic';
 type Person = { id: string; key: string; name: string; lastSeen: number };
-type State = { teacherKey: string; teacherName: string; members: Person[]; round: number; status: Classroom['status']; roster: string[]; answers: Record<string,string> };
+type State = { files?: FileState; teacherKey: string; teacherName: string; members: Person[]; round: number; status: Classroom['status']; roster: string[]; answers: Record<string,string> };
 class Problem extends Error { constructor(message: string, public status = 400) { super(message); } }
 function reply(data: unknown, status = 200) { return Response.json(data, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 async function key(request: Request) {
@@ -15,18 +16,18 @@ async function key(request: Request) {
 }
 function name(value: unknown) { if (typeof value !== 'string' || !value.trim() || value.trim().length > 20) throw new Problem('名字需要填写 1–20 个字。'); return value.trim(); }
 function code(value: unknown) { if (typeof value !== 'string' || !/^\d{6}$/.test(value)) throw new Problem('请输入 6 位课堂码。'); return value; }
-function view(s: State, roomCode: string, hash: string, revision: number): Classroom {
+function view(s: State, roomCode: string, hash: string, revision: number, includeSignals = false): Classroom {
   const teacher = s.teacherKey === hash;
   const me = s.members.find(m => m.key === hash);
   if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
-  return { code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
+  return { files: fileView(s.files, teacher, me?.id, includeSignals), code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
     members: s.members.map(m => ({ id: m.id, name: m.name, online: Date.now() - m.lastSeen < 45000, participating: s.roster.includes(m.id), submitted: Object.hasOwn(s.answers, m.id), ...(s.status === 'revealed' && Object.hasOwn(s.answers, m.id) ? { answer: s.answers[m.id] } : {}) })),
     submitted: s.roster.filter(id => Object.hasOwn(s.answers,id)).length, total: s.roster.length, ownAnswer: me ? s.answers[me.id] ?? null : null };
 }
 function reveal(s: State) { if (s.status === 'answering' && s.roster.length > 0 && s.roster.every(id => Object.hasOwn(s.answers, id))) s.status = 'revealed'; }
 async function read(roomCode: string) { const rows = await getDb().select().from(classrooms).where(eq(classrooms.code, roomCode)); if (!rows[0]) throw new Problem('没有找到这个课堂，请检查课堂码。', 404); return rows[0]; }
 export async function GET(request: Request) {
-  try { const hash = await key(request); const roomCode = code(new URL(request.url).searchParams.get('code')); const row = await read(roomCode); return reply(view(JSON.parse(row.state), roomCode, hash, row.revision)); }
+  try { const hash = await key(request); const roomCode = code(new URL(request.url).searchParams.get('code')); const row = await read(roomCode); return reply(view(JSON.parse(row.state), roomCode, hash, row.revision, new URL(request.url).searchParams.get('files') === '1')); }
   catch (e) { return failure(e); }
 }
 function failure(e: unknown) { return e instanceof Problem ? reply({ error: e.message }, e.status) : reply({ error: '暂时连接不上课堂，请稍后重试。' }, 503); }
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
     const origin = request.headers.get('origin');
     if (origin && origin !== new URL(request.url).origin) throw new Problem('请求来源不匹配。', 403);
     const hash = await key(request);
-    const raw = await request.text(); if (raw.length > 8000) throw new Problem('提交内容太长了。', 413);
+    const raw = await request.text(); if (raw.length > 40000) throw new Problem('提交内容太长了。', 413);
     let body; try { body = JSON.parse(raw); } catch { throw new Problem('请求格式有误。'); }
     if (!body || typeof body !== 'object') throw new Problem('请求格式有误。');
     if (body.action === 'create') {
@@ -61,7 +62,10 @@ export async function POST(request: Request) {
         }
       } else {
         if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
-        switch (body.action) {
+        if (typeof body.action === 'string' && body.action.startsWith('files-')) {
+          try { s.files = updateFiles(s.files, body, teacher, me?.id); }
+          catch (e) { throw new Problem((e as Error).message, 409); }
+        } else switch (body.action) {
           case 'heartbeat': if (me) me.lastSeen = Date.now(); break;
           case 'start': teacherOnly();
             if (s.status === 'answering') throw new Problem('请先等本轮收齐答案。');
@@ -83,7 +87,7 @@ export async function POST(request: Request) {
         }
       }
       const saved = await getDb().update(classrooms).set({ state: JSON.stringify(s), revision: row.revision+1 }).where(and(eq(classrooms.code, roomCode), eq(classrooms.revision,row.revision))).returning({ revision: classrooms.revision });
-      if (saved.length) return reply(view(s,roomCode,hash,row.revision+1));
+      if (saved.length) return reply(view(s,roomCode,hash,row.revision+1, typeof body.action === 'string' && body.action.startsWith('files-')));
     }
     throw new Problem('刚刚有很多同学在操作，请再试一次。', 409);
   } catch (e) { return failure(e); }
