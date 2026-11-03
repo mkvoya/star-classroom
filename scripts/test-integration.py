@@ -36,8 +36,8 @@ with tempfile.TemporaryDirectory(prefix='star-classroom-test-') as temp:
                     if time.monotonic() >= deadline:
                         raise TimeoutError('Preview server did not become ready')
                     time.sleep(1)
-            # files_api imports and runs the classroom regressions first.
-            subprocess.run(['python3', 'tests/files_api.py'], cwd=ROOT, env=env,
+            # blackboard_api runs file and classroom regressions first.
+            subprocess.run(['python3', 'tests/blackboard_api.py'], cwd=ROOT, env=env,
                            check=True, timeout=120)
         except BaseException:
             log.flush()

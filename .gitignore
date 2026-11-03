@@ -62,3 +62,6 @@ next-env.d.ts
 token.json
 __pycache__/
 *.py[cod]
+
+# Browser verification artifacts
+/output/

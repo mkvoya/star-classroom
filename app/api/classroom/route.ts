@@ -1,3 +1,4 @@
+import { BLACKBOARD_LIMIT, EMPTY_BLACKBOARD, type Blackboard } from '@/lib/blackboard';
 import { env } from 'cloudflare:workers';
 import { canEnableTurn, DIRECT_ICE, issueTurn, turnConfigured, TURN_TTL, type TurnEnvironment } from '@/lib/cloudflare-turn';
 import { getDb } from '@/db';
@@ -7,7 +8,7 @@ import { fileView, updateFiles, type FileState } from '@/lib/file-signaling';
 import type { Classroom } from '@/app/classroom';
 export const dynamic = 'force-dynamic';
 type Person = { id: string; key: string; name: string; lastSeen: number };
-type State = { files?: FileState; teacherKey: string; teacherName: string; members: Person[]; round: number; status: Classroom['status']; roster: string[]; answers: Record<string,string> };
+type State = { blackboard?: Blackboard; files?: FileState; teacherKey: string; teacherName: string; members: Person[]; round: number; status: Classroom['status']; roster: string[]; answers: Record<string,string> };
 class Problem extends Error { constructor(message: string, public status = 400) { super(message); } }
 function reply(data: unknown, status = 200) { return Response.json(data, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 async function key(request: Request) {
@@ -22,7 +23,7 @@ function view(s: State, roomCode: string, hash: string, revision: number, includ
   const teacher = s.teacherKey === hash;
   const me = s.members.find(m => m.key === hash);
   if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
-  return { files: { ...fileView(s.files, teacher, me?.id, includeSignals), relay: turnConfigured(env as TurnEnvironment) ? (s.files?.turnEnabled ? 'enabled' : 'disabled') : 'unconfigured' }, code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
+  return { blackboard: s.blackboard ?? EMPTY_BLACKBOARD, files: { ...fileView(s.files, teacher, me?.id, includeSignals), relay: turnConfigured(env as TurnEnvironment) ? (s.files?.turnEnabled ? 'enabled' : 'disabled') : 'unconfigured' }, code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
     members: s.members.map(m => ({ id: m.id, name: m.name, online: Date.now() - m.lastSeen < 45000, participating: s.roster.includes(m.id), submitted: Object.hasOwn(s.answers, m.id), ...(s.status === 'revealed' && Object.hasOwn(s.answers, m.id) ? { answer: s.answers[m.id] } : {}) })),
     submitted: s.roster.filter(id => Object.hasOwn(s.answers,id)).length, total: s.roster.length, ownAnswer: me ? s.answers[me.id] ?? null : null };
 }
@@ -70,6 +71,10 @@ export async function POST(request: Request) {
           try { s.files = updateFiles(s.files, body, teacher, me?.id); if (body.action === 'files-open' && s.files) s.files.turnEnabled = turnAllowed; }
           catch (e) { throw new Problem((e as Error).message, 409); }
         } else switch (body.action) {
+          case 'blackboard-publish': teacherOnly();
+            if (typeof body.markdown !== 'string' || body.markdown.length > BLACKBOARD_LIMIT) throw new Problem('黑板内容不能超过 10000 字。');
+            if (body.boardVersion !== (s.blackboard?.version ?? 0)) throw new Problem('黑板已在其他页面更新。请先复制你的草稿，再载入已发布内容后重新编辑。', 409);
+            s.blackboard = { markdown: body.markdown, version: (s.blackboard?.version ?? 0) + 1, updatedAt: new Date().toISOString() }; break;
           case 'heartbeat': if (me) me.lastSeen = Date.now(); break;
           case 'start': teacherOnly();
             if (s.status === 'answering') throw new Problem('请先等本轮收齐答案。');
