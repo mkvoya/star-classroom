@@ -34,3 +34,5 @@ React / Vinext + Cloudflare Workers + D1。轮次与答案通过数据库 revisi
 当前使用 STUN 辅助直连，最多同时接收 4 个连接，其余请求等待；超时后学生可重试。尚未配置 TURN，因此不同网络、校园隔离网络或受限 NAT 下可能无法直连。上线课堂前请用实际师生网络验证；需要跨网兜底时再接入带短期凭据的 TURN 服务。连接失败不会显示提交成功。
 
 检查：`node tests/file-signaling.mjs`、`npx tsc --noEmit`、`python3 tests/files_api.py`（需本地 5173 预览）。若工作目录在云同步盘，可通过 `CLASSROOM_PREVIEW_STATE=/tmp/classroom-file-preview` 指定独立预览数据库目录，先对该目录应用 drizzle 迁移；线上数据库不受此选项影响。
+
+教师可点击「全部下载（ZIP）」一次导出当前课堂、本浏览器保存的全部收件。ZIP 按学生分目录，保留每次提交，并附带不含浏览器凭据的 `提交清单.json`，记录原始文件名、提交编号、接收时间与 ZIP 内路径。打包期间新到的文件不加入当前导出；单份下载仍可用。

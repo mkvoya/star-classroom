@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import { notebookArchive } from '@/lib/notebook-archive';
 import type { Classroom } from '@/app/classroom';
 import type { FileView } from '@/lib/file-signaling';
 import { digest, gathered, listReceipts, MAX_FILE, saveReceipt, validateNotebook, type Receipt } from '@/lib/notebook-store';
@@ -11,6 +12,8 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   const teacher=room.role==='teacher';
   const [available,setAvailable]=useState<string|null>(null),[receiving,setReceiving]=useState(false),[busy,setBusy]=useState(false),[status,setStatus]=useState(''),[error,setError]=useState('');
   const [file,setFile]=useState<File|null>(null),[studentId,setStudentId]=useState(''),[receipts,setReceipts]=useState<Receipt[]>([]),[progress,setProgress]=useState<Record<string,string>>({});
+  const [packing,setPacking]=useState(false),[exportStatus,setExportStatus]=useState('');
+  const exporting=useRef(false);
   const session=useRef<string|null>(null), peers=useRef(new Map<string,Peer>()), handled=useRef(new Set<string>()), alive=useRef(true), lastPoll=useRef(0), members=useRef(room.members);
   members.current=room.members;
   async function api(action?: string, extra: Record<string,unknown> = {}): Promise<FileView> {
@@ -122,10 +125,24 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     }catch(e){fail(message(e));}
   }
   function download(r:Receipt){const url=URL.createObjectURL(r.blob);const a=document.createElement('a');a.href=url;a.download=`${r.student}_${r.id.slice(0,8)}_${r.name}`.replace(/[\\/:*?"<>|]/g,'_');a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
+  async function downloadAll(){
+    if(exporting.current||!receipts.length)return;
+    exporting.current=true;setPacking(true);setError('');
+    const snapshot=[...receipts];setExportStatus(`正在打包 0 / ${snapshot.length} 份…`);
+    try{
+      const blob=await notebookArchive(snapshot,done=>{if(alive.current)setExportStatus(`正在打包 ${done} / ${snapshot.length} 份…`);});
+      if(!alive.current)return;
+      const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;
+      a.download=`课堂${room.code}_作业_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`;a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+      setExportStatus(`已生成 ${snapshot.length} 份作业的 ZIP，请查看浏览器下载。`);
+    }catch(e){if(alive.current){setError(`批量下载失败：${message(e)}`);setExportStatus('');}}
+    finally{exporting.current=false;if(alive.current)setPacking(false);}
+  }
   return <section className="file-inbox" aria-labelledby="file-inbox-title"><div className="section-title"><h2 id="file-inbox-title">课堂收件箱</h2><span className="subtle">Notebook · 单份最大 20 MB</span></div>
     {teacher?<><p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
       <div role="status" aria-live="polite">{Object.entries(progress).map(([id,text])=><p key={id}>{text}</p>)}</div>
-      <h3>本浏览器已收 {receipts.length} 份</h3>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
+      <h3>本浏览器已收 {receipts.length} 份</h3><button className="secondary" disabled={!receipts.length||packing} onClick={downloadAll}>{packing?'正在打包…':'全部下载（ZIP）'}</button><p className="tiny-note">包含当前课堂本浏览器已收到的全部作业，保留重交版本；打包期间新收到的文件请下次下载。</p><p role="status" aria-live="polite">{exportStatus}</p>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
       <form onSubmit={e=>{e.preventDefault();void send();}}><p>{available?'老师正在接收，可以发送作业。':'老师尚未开启接收，或已经离线。'}</p><label htmlFor="homework-student-id">学号</label><input id="homework-student-id" value={studentId} onChange={e=>setStudentId(e.target.value)} maxLength={40} required disabled={busy}/><label htmlFor="homework-file">作业文件</label><input id="homework-file" type="file" accept=".ipynb" disabled={!available||busy} onChange={e=>{setFile(e.target.files?.[0]||null);setStatus('');setError('');}}/><button className="primary" disabled={!available||!file||busy}>{busy?'正在传输…':'发送给老师'}</button>{busy&&<button type="button" className="secondary" onClick={closePeers}>取消传输</button>}<p role="status" aria-live="polite">{status}</p><p className="tiny-note">以“提交成功”为准。传输期间请勿关闭页面；同学之间看不到作业文件。</p></form>}
     {error&&<div className="error" role="alert">{error}</div>}
   </section>;
