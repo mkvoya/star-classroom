@@ -6,7 +6,7 @@ import type { FileView } from '@/lib/file-signaling';
 import { digest, gathered, listReceipts, MAX_FILE, saveReceipt, validateNotebook, type Receipt } from '@/lib/notebook-store';
 
 type Peer = { pc: RTCPeerConnection; close: () => void };
-const rtcConfig: RTCConfiguration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig: RTCConfiguration = { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] };
 const message = (e: unknown) => e instanceof Error ? e.message : '传输失败，请重试。';
 export function FileInbox({ room, identity }: { room: Classroom; identity: string }) {
   const teacher=room.role==='teacher';
@@ -14,6 +14,22 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   const [file,setFile]=useState<File|null>(null),[studentId,setStudentId]=useState(''),[receipts,setReceipts]=useState<Receipt[]>([]),[progress,setProgress]=useState<Record<string,string>>({});
   const [packing,setPacking]=useState(false),[exportStatus,setExportStatus]=useState('');
   const exporting=useRef(false);
+  const iceCache=useRef<{session:string;expiresAt:number;config:RTCConfiguration}|null>(null);
+  const icePending=useRef<{session:string;promise:Promise<RTCConfiguration>}|null>(null);
+  async function connectionConfig(current:string):Promise<RTCConfiguration>{
+    const cached=iceCache.current;
+    if(cached?.session===current&&cached.expiresAt>Date.now()+180000)return cached.config;
+    if(icePending.current?.session===current)return icePending.current.promise;
+    const promise=(async()=>{
+      const r=await fetch('/api/classroom',{method:'POST',headers:{'Content-Type':'application/json','x-classroom-key':identity},signal:AbortSignal.timeout(12000),body:JSON.stringify({action:'files-ice',code:room.code,session:current})});
+      const data=await r.json() as {error?:string;iceServers:RTCIceServer[];expiresAt:number};
+      if(!r.ok)throw new Error(data.error||'无法准备文件连接，请重试。');
+      const config:RTCConfiguration={iceServers:data.iceServers};
+      iceCache.current={session:current,expiresAt:data.expiresAt,config};return config;
+    })();
+    icePending.current={session:current,promise};
+    try{return await promise;}finally{if(icePending.current?.promise===promise)icePending.current=null;}
+  }
   const session=useRef<string|null>(null), peers=useRef(new Map<string,Peer>()), handled=useRef(new Set<string>()), alive=useRef(true), lastPoll=useRef(0), members=useRef(room.members);
   members.current=room.members;
   async function api(action?: string, extra: Record<string,unknown> = {}): Promise<FileView> {
@@ -41,7 +57,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     const fail=(text:string)=>{if(done)return;done=true;update(signal.id,`${label}：${text}`);try{channel?.send(JSON.stringify({type:'error',message:text}));}catch{};close();};
     const timer=setTimeout(()=>fail('连接或传输超时，请让同学重试。'),120000);
     peers.current.set(signal.id,{pc,close});update(signal.id,`${label}：正在连接…`);
-    pc.onconnectionstatechange=()=>{if(pc.connectionState==='failed')fail('无法直连，请重试或更换网络。');};
+    pc.onconnectionstatechange=()=>{if(pc.connectionState==='failed')fail('无法建立文件连接，请重试或更换网络。');};
     pc.ondatachannel=event=>{
       if(channel){event.channel.close();return;}channel=event.channel;channel.binaryType='arraybuffer';
       channel.onclose=()=>{if(!done)fail('连接中断，尚未收到完整文件。');};
@@ -73,7 +89,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
         }
       }catch(e){done=false;fail(message(e));}};
     };
-    try{await pc.setRemoteDescription({type:'offer',sdp:signal.offer});await pc.setLocalDescription(await pc.createAnswer());await gathered(pc);if(session.current!==current)throw new Error('接收已关闭。');await api('files-answer',{session:current,id:signal.id,memberId:signal.memberId,sdp:pc.localDescription!.sdp});}
+    try{pc.setConfiguration(await connectionConfig(current));if(session.current!==current)throw new Error('接收已关闭。');await pc.setRemoteDescription({type:'offer',sdp:signal.offer});await pc.setLocalDescription(await pc.createAnswer());await gathered(pc);if(session.current!==current)throw new Error('接收已关闭。');await api('files-answer',{session:current,id:signal.id,memberId:signal.memberId,sdp:pc.localDescription!.sdp});}
     catch(e){fail(message(e));}
   }
 
@@ -103,9 +119,11 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
       if(!/^[-\w]{1,40}$/.test(studentId.trim()))throw new Error('请填写学号（字母、数字、横线或下划线）。');
       if(!file.name.toLowerCase().endsWith('.ipynb')||file.size<1||file.size>MAX_FILE)throw new Error('请选择不超过 20 MB 的 .ipynb 文件。');
       const bytes=await file.arrayBuffer();validateNotebook(new TextDecoder().decode(bytes));const hash=await digest(bytes);
-      pc=new RTCPeerConnection(rtcConfig);const channel=pc.createDataChannel('notebook',{ordered:true});channel.bufferedAmountLowThreshold=65536;
-      peers.current.set(id,{pc,close:()=>fail('传输已取消。')});timer=setTimeout(()=>fail('传输超时。可能无法直连，请重试或更换网络。'),120000);
-      pc.onconnectionstatechange=()=>{if(pc?.connectionState==='failed')fail('无法直连，请重试或更换网络。');};
+      setStatus('准备安全连接…');
+      const config=await connectionConfig(current);if(!alive.current)throw new Error('页面已关闭。');
+      pc=new RTCPeerConnection(config);const channel=pc.createDataChannel('notebook',{ordered:true});channel.bufferedAmountLowThreshold=65536;
+      peers.current.set(id,{pc,close:()=>fail('传输已取消。')});timer=setTimeout(()=>fail('传输超时。可能无法建立文件连接，请重试或更换网络。'),120000);
+      pc.onconnectionstatechange=()=>{if(pc?.connectionState==='failed')fail('无法建立文件连接，请重试或更换网络。');};
       channel.onclose=()=>{if(!finished)fail('连接中断，未收到老师确认。');};
       channel.onopen=()=>{setStatus('已连接，等待老师接收…');channel.send(JSON.stringify({type:'meta',name:file.name,size:file.size,hash,studentId:studentId.trim()}));};
       let sending=false;
@@ -140,7 +158,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     finally{exporting.current=false;if(alive.current)setPacking(false);}
   }
   return <section className="file-inbox" aria-labelledby="file-inbox-title"><div className="section-title"><h2 id="file-inbox-title">课堂收件箱</h2><span className="subtle">Notebook · 单份最大 20 MB</span></div>
-    {teacher?<><p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
+    {teacher?<>{room.files.relay==='enabled'&&<p className="tiny-note">跨网络接收已启用，系统会自动选择直连或中继。</p>}{room.files.relay==='signin'&&<p className="tiny-note">如需跨网络接收，请先<a href={`/signin-with-chatgpt?return_to=${encodeURIComponent('/?room='+room.code)}`} target="_top">使用网站所有者账号登录</a>，然后重新开启接收；学生无需登录。</p>}{room.files.relay==='unconfigured'&&<p className="tiny-note">当前使用直连；跨网络接收尚未配置。</p>}<p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
       <div role="status" aria-live="polite">{Object.entries(progress).map(([id,text])=><p key={id}>{text}</p>)}</div>
       <h3>本浏览器已收 {receipts.length} 份</h3><button className="secondary" disabled={!receipts.length||packing} onClick={downloadAll}>{packing?'正在打包…':'全部下载（ZIP）'}</button><p className="tiny-note">包含当前课堂本浏览器已收到的全部作业，保留重交版本；打包期间新收到的文件请下次下载。</p><p role="status" aria-live="polite">{exportStatus}</p>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
       <form onSubmit={e=>{e.preventDefault();void send();}}><p>{available?'老师正在接收，可以发送作业。':'老师尚未开启接收，或已经离线。'}</p><label htmlFor="homework-student-id">学号</label><input id="homework-student-id" value={studentId} onChange={e=>setStudentId(e.target.value)} maxLength={40} required disabled={busy}/><label htmlFor="homework-file">作业文件</label><input id="homework-file" type="file" accept=".ipynb" disabled={!available||busy} onChange={e=>{setFile(e.target.files?.[0]||null);setStatus('');setError('');}}/><button className="primary" disabled={!available||!file||busy}>{busy?'正在传输…':'发送给老师'}</button>{busy&&<button type="button" className="secondary" onClick={closePeers}>取消传输</button>}<p role="status" aria-live="polite">{status}</p><p className="tiny-note">以“提交成功”为准。传输期间请勿关闭页面；同学之间看不到作业文件。</p></form>}

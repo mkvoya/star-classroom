@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { canEnableTurn, issueTurn, normalizeIceServers, TURN_TTL } from '../lib/cloudflare-turn.ts';
+const env={CLOUDFLARE_TURN_KEY_ID:'test-key',CLOUDFLARE_TURN_API_TOKEN:'test-master-token',TURN_OWNER_USER_ID:'owner'};
+assert.equal(canEnableTurn(env,null),false);
+assert.equal(canEnableTurn(env,'stranger'),false);
+assert.equal(canEnableTurn(env,'owner'),true);
+assert.equal(canEnableTurn({},'owner'),false);
+let calls=0;
+const servers=await issueTurn(env,async(url,options)=>{
+ calls++;
+ assert.equal(url,'https://rtc.live.cloudflare.com/v1/turn/keys/test-key/credentials/generate-ice-servers');
+ assert.equal(options.headers.Authorization,'Bearer test-master-token');
+ assert.equal(JSON.parse(options.body).ttl,TURN_TTL);
+ return Response.json({iceServers:[{urls:['stun:stun.cloudflare.com:3478']},{urls:['turn:turn.cloudflare.com:3478?transport=udp','turn:turn.cloudflare.com:53?transport=udp','turns:turn.cloudflare.com:443?transport=tcp','turn:attacker.test:3478'],username:'short-lived',credential:'short-lived-password'}]});
+});
+assert.equal(calls,1);
+assert.deepEqual(servers[1].urls,['turn:turn.cloudflare.com:3478?transport=udp','turns:turn.cloudflare.com:443?transport=tcp']);
+assert.ok(!JSON.stringify(servers).includes('test-master-token'));
+assert.throws(()=>normalizeIceServers({iceServers:[{urls:['turn:turn.cloudflare.com:3478?transport=udp']}]}));
+assert.throws(()=>normalizeIceServers({iceServers:[{urls:['stun:stun.cloudflare.com:3478']}]}));
+await assert.rejects(()=>issueTurn(env,async()=>new Response('secret-provider-error',{status:401})),/^Error: TURN provider unavailable$/);
+await assert.rejects(()=>issueTurn({},async()=>{throw new Error('should not fetch');}));
+console.log('PASS: owner authorization, scoped Cloudflare API call, ten-minute TTL, browser-safe URLs, malformed responses and secret-safe failures.');

@@ -31,8 +31,19 @@ React / Vinext + Cloudflare Workers + D1。轮次与答案通过数据库 revisi
 
 接收端校验字节数、SHA-256 和 Notebook 格式，IndexedDB 事务提交后才向学生发送成功确认。文件保存在教师当前浏览器、当前网站的本地存储里，刷新后可恢复，每次重交保留独立记录。请使用收件列表的「下载」按钮另存备份；清理浏览器网站数据、换浏览器或换网站地址不能恢复原浏览器里的副本。传输成功与已下载到磁盘是不同状态。学号和原有姓名均由学生填写，不验证真实身份。
 
-当前使用 STUN 辅助直连，最多同时接收 4 个连接，其余请求等待；超时后学生可重试。尚未配置 TURN，因此不同网络、校园隔离网络或受限 NAT 下可能无法直连。上线课堂前请用实际师生网络验证；需要跨网兜底时再接入带短期凭据的 TURN 服务。连接失败不会显示提交成功。
+支持 Cloudflare TURN 兜底，最多同时接收 4 个连接，其余请求等待；超时后学生可重试。启用中继后浏览器自动选择直连或中继，连接失败不会显示提交成功。上线课堂前仍应在实际师生网络验证。
 
 检查：`node tests/file-signaling.mjs`、`npx tsc --noEmit`、`python3 tests/files_api.py`（需本地 5173 预览）。若工作目录在云同步盘，可通过 `CLASSROOM_PREVIEW_STATE=/tmp/classroom-file-preview` 指定独立预览数据库目录，先对该目录应用 drizzle 迁移；线上数据库不受此选项影响。
 
 教师可点击「全部下载（ZIP）」一次导出当前课堂、本浏览器保存的全部收件。ZIP 按学生分目录，保留每次提交，并附带不含浏览器凭据的 `提交清单.json`，记录原始文件名、提交编号、接收时间与 ZIP 内路径。打包期间新到的文件不加入当前导出；单份下载仍可用。
+
+
+## Cloudflare TURN
+
+生产密钥由 Sites 环境变量管理，不写入仓库：`CLOUDFLARE_TURN_KEY_ID`、`CLOUDFLARE_TURN_API_TOKEN`、`TURN_OWNER_USER_ID`。前两项来自 Cloudflare Realtime TURN 专用 key，最后一项是本站所有者的可信平台用户 ID。不是 Cloudflare Global API Key。
+
+教师使用本站所有者的 ChatGPT 账号登录，再开启接收；服务端依据平台认证身份授予该接收会话中继权限，学生仍用课堂码进入。其他访客创建的课堂仅能直连。`files-ice` 要求有效课堂身份、当前接收会话和教师心跳，返回每成员独立的 10 分钟临时凭据。凭据在服务端缓存，在有效期剩余不足 3 分钟时更新；每成员新申请至少间隔 15 秒，使用数据库 revision 原子占位防止并发重复签发。普通课堂/信令响应不包含任何 TURN 凭据。主 API Token 只用于服务端调用 Cloudflare。
+
+停止接收关闭浏览器连接并停止签发凭据，但不立即撤销已签发的临时凭据。课堂码和浏览器身份不是实名身份验证，短期凭据在有效期内也可能被复制，需在 Cloudflare 控制台关注额度使用。
+
+未配置密钥时保留原来的直连功能。Cloudflare API 异常时显示重试提示，不假报中继已就绪。凭据响应过滤浏览器不支持的端口及非 Cloudflare 主机。测试包括 `node tests/cloudflare-turn.mjs`；`tests/files_api.py` 在未配置 TURN 的本地环境检查认证与回退。

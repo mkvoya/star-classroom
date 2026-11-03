@@ -27,7 +27,7 @@ export async function gathered(pc: RTCPeerConnection) {
   if (pc.iceGatheringState==='complete') return;
   await new Promise<void>((resolve,reject)=>{
     const finish=()=>{if(pc.iceGatheringState==='complete'){clearTimeout(timer);pc.removeEventListener('icegatheringstatechange',finish);resolve();}};
-    const timer=setTimeout(()=>{pc.removeEventListener('icegatheringstatechange',finish);reject(new Error('建立连接超时，请重试。'));},12000);
+    const timer=setTimeout(()=>{pc.removeEventListener('icegatheringstatechange',finish);if(pc.localDescription?.sdp?.includes('a=candidate:'))resolve();else reject(new Error('建立连接超时，请重试。'));},12000);
     pc.addEventListener('icegatheringstatechange',finish);finish();
   });
 }

@@ -1,3 +1,6 @@
+import { env } from 'cloudflare:workers';
+import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { canEnableTurn, DIRECT_ICE, issueTurn, turnConfigured, TURN_TTL, type TurnEnvironment } from '@/lib/cloudflare-turn';
 import { getDb } from '@/db';
 import { classrooms, classroomRounds } from '@/db/schema';
 import { and, eq } from 'drizzle-orm';
@@ -20,7 +23,7 @@ function view(s: State, roomCode: string, hash: string, revision: number, includ
   const teacher = s.teacherKey === hash;
   const me = s.members.find(m => m.key === hash);
   if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
-  return { files: fileView(s.files, teacher, me?.id, includeSignals), code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
+  return { files: { ...fileView(s.files, teacher, me?.id, includeSignals), relay: turnConfigured(env as TurnEnvironment) ? (s.files?.turnEnabled ? 'enabled' : 'signin') : 'unconfigured' }, code: roomCode, teacherName: s.teacherName, role: teacher ? 'teacher' : 'student', myId: me?.id || null, round: s.round, status: s.status, revision,
     members: s.members.map(m => ({ id: m.id, name: m.name, online: Date.now() - m.lastSeen < 45000, participating: s.roster.includes(m.id), submitted: Object.hasOwn(s.answers, m.id), ...(s.status === 'revealed' && Object.hasOwn(s.answers, m.id) ? { answer: s.answers[m.id] } : {}) })),
     submitted: s.roster.filter(id => Object.hasOwn(s.answers,id)).length, total: s.roster.length, ownAnswer: me ? s.answers[me.id] ?? null : null };
 }
@@ -50,6 +53,8 @@ export async function POST(request: Request) {
       throw new Problem('课堂创建繁忙，请重试。', 503);
     }
     const roomCode = code(body.code);
+    if (body.action === 'files-ice') return iceCredentials(roomCode, hash, body.session);
+    const turnOwner = body.action === 'files-open' ? canEnableTurn(env as TurnEnvironment, (await getChatGPTUser())?.userId ?? null) : false;
     for (let attempt=0; attempt<10; attempt++) {
       const row = await read(roomCode); const s: State = JSON.parse(row.state);
       const teacher = s.teacherKey === hash; let me = s.members.find(m => m.key === hash);
@@ -63,7 +68,7 @@ export async function POST(request: Request) {
       } else {
         if (!teacher && !me) throw new Problem('你还不在这个课堂，请重新加入。', 403);
         if (typeof body.action === 'string' && body.action.startsWith('files-')) {
-          try { s.files = updateFiles(s.files, body, teacher, me?.id); }
+          try { s.files = updateFiles(s.files, body, teacher, me?.id); if (body.action === 'files-open' && s.files) s.files.turnEnabled = turnOwner; }
           catch (e) { throw new Problem((e as Error).message, 409); }
         } else switch (body.action) {
           case 'heartbeat': if (me) me.lastSeen = Date.now(); break;
@@ -91,4 +96,43 @@ export async function POST(request: Request) {
     }
     throw new Problem('刚刚有很多同学在操作，请再试一次。', 409);
   } catch (e) { return failure(e); }
+}
+
+
+// A durable per-member claim prevents parallel requests from minting extra credentials.
+async function iceCredentials(roomCode: string, hash: string, session: unknown): Promise<Response> {
+  try {
+    let grantKey = '';
+    const authorize = (s: State) => {
+      const teacher = s.teacherKey === hash;
+      const member = s.members.find(m => m.key === hash);
+      if (!teacher && !member) throw new Problem('你还不在这个课堂。', 403);
+      if (!s.files || fileView(s.files, teacher, member?.id).session !== session || typeof session !== 'string') throw new Problem('老师已停止接收，请重新连接。', 409);
+      grantKey = teacher ? 'teacher' : member!.id;
+    };
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const row = await read(roomCode); const s: State = JSON.parse(row.state); authorize(s);
+      if (!turnConfigured(env as TurnEnvironment) || !s.files!.turnEnabled) return reply({ iceServers: DIRECT_ICE, expiresAt: Date.now() + 60000, relay: false });
+      const now = Date.now(); const grant = s.files!.grants?.[grantKey];
+      if (grant?.servers && grant.expiresAt > now + 180000) return reply({ iceServers: grant.servers, expiresAt: grant.expiresAt, relay: true });
+      if (grant && now - grant.requestedAt < 15000) throw new Problem('连接凭据正在准备，请稍后重试。', 429);
+      s.files!.grants ??= {}; s.files!.grants[grantKey] = { requestedAt: now, expiresAt: 0 };
+      const claimed = await getDb().update(classrooms).set({ state: JSON.stringify(s), revision: row.revision + 1 }).where(and(eq(classrooms.code, roomCode), eq(classrooms.revision, row.revision))).returning({ revision: classrooms.revision });
+      if (!claimed.length) continue;
+      let servers;
+      try { servers = await issueTurn(env as TurnEnvironment); }
+      catch { throw new Problem('跨网络连接服务暂时不可用，请稍后重试。', 503); }
+      const expiresAt = now + TURN_TTL * 1000;
+      for (let saveAttempt = 0; saveAttempt < 10; saveAttempt++) {
+        const latest = await read(roomCode); const next: State = JSON.parse(latest.state); authorize(next);
+        if (!next.files!.turnEnabled) throw new Problem('中继接收已关闭。', 409);
+        if (next.files!.grants?.[grantKey]?.requestedAt !== now) throw new Problem('连接请求已更新，请重试。', 409);
+        next.files!.grants![grantKey] = { requestedAt: now, expiresAt, servers };
+        const saved = await getDb().update(classrooms).set({ state: JSON.stringify(next), revision: latest.revision + 1 }).where(and(eq(classrooms.code, roomCode), eq(classrooms.revision, latest.revision))).returning({ revision: classrooms.revision });
+        if (saved.length) return reply({ iceServers: servers, expiresAt, relay: true });
+      }
+      throw new Problem('课堂繁忙，请稍后重试。', 409);
+    }
+    throw new Problem('课堂繁忙，请稍后重试。', 409);
+  } catch (error) { return failure(error); }
 }
