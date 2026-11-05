@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { notebookArchive } from '@/lib/notebook-archive';
 import type { Classroom } from '@/app/classroom';
 import type { FileView } from '@/lib/file-signaling';
-import { digest, gathered, listReceipts, MAX_FILE, saveReceipt, validateNotebook, type Receipt } from '@/lib/notebook-store';
+import { clearReceipts, digest, gathered, listReceipts, MAX_FILE, saveReceipt, validateNotebook, type Receipt } from '@/lib/notebook-store';
 
 type Peer = { pc: RTCPeerConnection; close: () => void };
 const rtcConfig: RTCConfiguration = { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] };
@@ -14,6 +14,8 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   const [file,setFile]=useState<File|null>(null),[studentId,setStudentId]=useState(''),[receipts,setReceipts]=useState<Receipt[]>([]),[progress,setProgress]=useState<Record<string,string>>({});
   const [packing,setPacking]=useState(false),[exportStatus,setExportStatus]=useState('');
   const [turnPassphrase,setTurnPassphrase]=useState(''),[receiveNotice,setReceiveNotice]=useState('');
+  const [clearing,setClearing]=useState(false),[savingCount,setSavingCount]=useState(0),[clearStatus,setClearStatus]=useState('');
+  const deleting=useRef(false),saving=useRef(0);
   const exporting=useRef(false);
   const iceCache=useRef<{session:string;expiresAt:number;config:RTCConfiguration}|null>(null);
   const icePending=useRef<{session:string;promise:Promise<RTCConfiguration>}|null>(null);
@@ -40,7 +42,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   function closePeers(){for(const p of peers.current.values())p.close();peers.current.clear();}
   function stop(){setReceiveNotice('');const old=session.current;session.current=null;setReceiving(false);setAvailable(null);closePeers();if(old)void api('files-close',{session:old}).catch(()=>{});}
   function update(id: string,text: string){if(alive.current)setProgress(p=>({...p,[id]:text}));}
-  async function start(){setError('');setReceiveNotice('');setBusy(true);try{
+  async function start(){if(deleting.current)return;setClearStatus('');setError('');setReceiveNotice('');setBusy(true);try{
     if(!globalThis.RTCPeerConnection)throw new Error('当前浏览器不支持文件直传，请使用新版 Chrome、Edge 或 Firefox。');
     await listReceipts(room.code,identity); // Verify local storage before accepting uploads.
     const id=crypto.randomUUID();const opened=await api('files-open',{session:id,turnPassphrase});session.current=id;handled.current.clear();setReceiving(true);setAvailable(id);
@@ -76,14 +78,18 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
             if(count!==meta.size)throw new Error('文件不完整，请重试。');
             // Block more messages while validating and saving this completed file.
             done=true;
+            saving.current++;setSavingCount(saving.current);
+            try {
             const blob=new Blob(chunks,{type:'application/x-ipynb+json'});chunks=[];
             const bytes=await blob.arrayBuffer();if(await digest(bytes)!==meta.hash)throw new Error('文件校验失败，请重试。');validateNotebook(new TextDecoder().decode(bytes));
             const receipt:Receipt={id:signal.id,room:room.code,owner:identity,student:`${meta.studentId} ${label}`,name:meta.name,size:meta.size,receivedAt:new Date().toISOString(),blob};
+            if(session.current!==current)throw new Error('老师已停止接收。');
             await saveReceipt(receipt);
             if(alive.current)setReceipts(p=>[receipt,...p.filter(r=>r.id!==receipt.id)]);
             update(signal.id,`${label}：已保存到本浏览器`);
             channel!.send(JSON.stringify({type:'saved',id:signal.id}));
             clearTimeout(timer);setTimeout(close,1500);
+            } finally { saving.current--;if(alive.current)setSavingCount(saving.current); }
           }else throw new Error('传输顺序错误。');
         }else{
           if(!meta||!(event.data instanceof ArrayBuffer)||event.data.byteLength>65536||count+event.data.byteLength>meta.size)throw new Error('文件大小异常。');
@@ -146,7 +152,7 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
   }
   function download(r:Receipt){const url=URL.createObjectURL(r.blob);const a=document.createElement('a');a.href=url;a.download=`${r.student}_${r.id.slice(0,8)}_${r.name}`.replace(/[\\/:*?"<>|]/g,'_');a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
   async function downloadAll(){
-    if(exporting.current||!receipts.length)return;
+    if(exporting.current||deleting.current||!receipts.length)return;
     exporting.current=true;setPacking(true);setError('');
     const snapshot=[...receipts];setExportStatus(`正在打包 0 / ${snapshot.length} 份…`);
     try{
@@ -159,10 +165,20 @@ export function FileInbox({ room, identity }: { room: Classroom; identity: strin
     }catch(e){if(alive.current){setError(`批量下载失败：${message(e)}`);setExportStatus('');}}
     finally{exporting.current=false;if(alive.current)setPacking(false);}
   }
+  async function clearInbox(){
+    if(!teacher||deleting.current||exporting.current||session.current||saving.current||busy)return;
+    if(!window.confirm('清空当前课堂的全部收件？\n将永久删除本浏览器中已收到的作业文件和收件记录，无法撤销。请先下载备份。\n已下载到电脑的文件、其他课堂、答题记录和黑板不会受影响。'))return;
+    deleting.current=true;setClearing(true);setError('');setClearStatus('');
+    try{
+      await clearReceipts(room.code,identity);
+      if(alive.current){setReceipts([]);setProgress({});setExportStatus('');setClearStatus('已清空当前课堂的收件文件和记录。');}
+    }catch(e){if(alive.current)setError(`清空失败：${message(e)}，请重试。`);}
+    finally{deleting.current=false;if(alive.current)setClearing(false);}
+  }
   return <section className="file-inbox" aria-labelledby="file-inbox-title"><div className="section-title"><h2 id="file-inbox-title">课堂收件箱</h2><span className="subtle">Notebook · 单份最大 20 MB</span></div>
-    {teacher?<><p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><div>{!receiving&&<><label htmlFor="turn-passphrase">TURN 密钥（可选）</label><input id="turn-passphrase" type="password" autoComplete="off" value={turnPassphrase} maxLength={128} disabled={busy} onChange={e=>setTurnPassphrase(e.target.value)} placeholder="留空则仅使用直连"/><p className="tiny-note">输入正确密钥可启用跨网络中继；留空或密钥不正确时禁用 TURN。无需 ChatGPT 登录。</p></>}<p role="status" aria-live="polite">{receiveNotice}</p></div><button className={receiving?'secondary':'primary'} disabled={busy} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
+    {teacher?<><p>开启后，同学可以把作业直接传到这个浏览器。请保持页面打开。</p><div>{!receiving&&<><label htmlFor="turn-passphrase">TURN 密钥（可选）</label><input id="turn-passphrase" type="password" autoComplete="off" value={turnPassphrase} maxLength={128} disabled={busy} onChange={e=>setTurnPassphrase(e.target.value)} placeholder="留空则仅使用直连"/><p className="tiny-note">输入正确密钥可启用跨网络中继；留空或密钥不正确时禁用 TURN。无需 ChatGPT 登录。</p></>}<p role="status" aria-live="polite">{receiveNotice}</p></div><button className={receiving?'secondary':'primary'} disabled={busy||clearing} onClick={receiving?stop:start}>{receiving?'停止接收':'开始接收作业'}</button><p className="tiny-note">{receiving?'正在接收。':'当前未开放接收。'}收到的文件会保存在本浏览器，请及时下载备份；清除网站数据会删除本地副本。</p>
       <div role="status" aria-live="polite">{Object.entries(progress).map(([id,text])=><p key={id}>{text}</p>)}</div>
-      <h3>本浏览器已收 {receipts.length} 份</h3><button className="secondary" disabled={!receipts.length||packing} onClick={downloadAll}>{packing?'正在打包…':'全部下载（ZIP）'}</button><p className="tiny-note">包含当前课堂本浏览器已收到的全部作业，保留重交版本；打包期间新收到的文件请下次下载。</p><p role="status" aria-live="polite">{exportStatus}</p>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
+      <h3>本浏览器已收 {receipts.length} 份</h3><button className="secondary" disabled={!receipts.length||packing||clearing} onClick={downloadAll}>{packing?'正在打包…':'全部下载（ZIP）'}</button><button className="secondary" disabled={clearing||packing||receiving||busy||savingCount>0||(!receipts.length&&!Object.keys(progress).length)} onClick={clearInbox}>{clearing?'正在清空…':'清空收件记录'}</button><p className="tiny-note">清空会删除当前课堂在本浏览器保存的文件和收件记录，请先下载备份。{receiving?'请先停止接收，再清空。':savingCount>0?'正在保存文件，请稍候再清空。':''}</p><p role="status" aria-live="polite">{clearStatus}</p><p className="tiny-note">包含当前课堂本浏览器已收到的全部作业，保留重交版本；打包期间新收到的文件请下次下载。</p><p role="status" aria-live="polite">{exportStatus}</p>{receipts.length>0&&<ul className="receipt-list">{receipts.map(r=><li key={r.id}><div><strong>{r.student}</strong><span>{r.name} · {(r.size/1024).toFixed(1)} KB</span><small>{new Date(r.receivedAt).toLocaleString()} · {r.id.slice(0,8)}</small></div><button className="secondary" disabled={clearing} onClick={()=>download(r)}>下载</button></li>)}</ul>}</>:
       <form onSubmit={e=>{e.preventDefault();void send();}}><p>{available?'老师正在接收，可以发送作业。':'老师尚未开启接收，或已经离线。'}</p><label htmlFor="homework-student-id">学号</label><input id="homework-student-id" value={studentId} onChange={e=>setStudentId(e.target.value)} maxLength={40} required disabled={busy}/><label htmlFor="homework-file">作业文件</label><input id="homework-file" type="file" accept=".ipynb" disabled={!available||busy} onChange={e=>{setFile(e.target.files?.[0]||null);setStatus('');setError('');}}/><button className="primary" disabled={!available||!file||busy}>{busy?'正在传输…':'发送给老师'}</button>{busy&&<button type="button" className="secondary" onClick={closePeers}>取消传输</button>}<p role="status" aria-live="polite">{status}</p><p className="tiny-note">以“提交成功”为准。传输期间请勿关闭页面；同学之间看不到作业文件。</p></form>}
     {error&&<div className="error" role="alert">{error}</div>}
   </section>;

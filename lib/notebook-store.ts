@@ -16,6 +16,24 @@ export async function listReceipts(room: string, owner: string): Promise<Receipt
   try { return await new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').getAll();r.onsuccess=()=>resolve((r.result as Receipt[]).filter(x=>x.room===room&&x.owner===owner).sort((a,b)=>b.receivedAt.localeCompare(a.receivedAt)));r.onerror=()=>reject(r.error);}); }
   finally { db.close(); }
 }
+// Delete only this classroom and browser identity, atomically with the file blobs.
+export async function clearReceipts(room: string, owner: string): Promise<void> {
+  const db=await open();
+  try { await new Promise<void>((resolve,reject)=>{
+    const tx=db.transaction('files','readwrite');
+    const request=tx.objectStore('files').openCursor();
+    request.onsuccess=()=>{
+      const cursor=request.result;
+      if(!cursor)return;
+      const receipt=cursor.value as Receipt;
+      if(receipt.room===room&&receipt.owner===owner)cursor.delete();
+      cursor.continue();
+    };
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error || new Error('清空收件失败'));
+    tx.onabort=()=>reject(tx.error || new Error('清空收件已取消'));
+  }); } finally { db.close(); }
+}
 export const MAX_FILE = 20 * 1024 * 1024;
 export function validateNotebook(text: string) {
   let value;
